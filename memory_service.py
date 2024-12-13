@@ -369,9 +369,8 @@ class InfinityMemoryService:
                     topn=limit
                 )
 
-                # 执行向量搜索，解包返回的元组
-                results_tuple = search_query.output(["memory_id", "content","timestamp", "metadata", "tags"]).to_result()
-                results = results_tuple #results_tuple[0] if isinstance(results_tuple, tuple) else results_tuple
+                # 执行向量搜索
+                results = search_query.output(["memory_id", "content", "timestamp", "metadata", "tags"]).to_result()
 
                 # 如果向量搜索没有结果，尝试文本搜索
                 if len(results) == 0:
@@ -380,46 +379,41 @@ class InfinityMemoryService:
                         matching_text=query_text,
                         topn=limit
                     )
-                    results_tuple = text_query.output(["memory_id", "content","timestamp", "metadata", "tags"]).to_result()
-                    results = results_tuple #results_tuple[0] if isinstance(results_tuple, tuple) else results_tuple
-
+                    results = text_query.output(["memory_id", "content", "timestamp", "metadata", "tags"]).to_result()
             else:
                 # 如果没有查询文本，直接返回最新记录
-                results_tuple = table.output(["memory_id", "content","timestamp", "metadata", "tags"]).limit(limit).to_result()
-                results = results_tuple #results_tuple[0] if isinstance(results_tuple, tuple) else results_tuple
+                results = table.output(["memory_id", "content", "timestamp", "metadata", "tags"]).limit(
+                    limit).to_result()
 
             # 处理结果
             memories = []
             if results is not None and len(results) > 0:
-                # 获取列名
-                columns = results.columns if hasattr(results, 'columns') else []
-
                 for idx in range(len(results)):
                     try:
-                        # 构建行数据
                         row = results[idx]
                         if not row:
                             continue
-                        #for col in columns:
-                        #    row[col] = results[col][idx] if idx < len(results[col]) else None
 
                         processed_row = self._process_row(row)
                         if processed_row:
                             # 在内存中进行过滤
                             if filter_metadata:
                                 metadata_match = all(
-                                    processed_row['metadata'].get(k) == v
+                                    str(processed_row['metadata'].get(k)) == str(v)
                                     for k, v in filter_metadata.items()
                                 )
                                 if not metadata_match:
                                     continue
 
                             if filter_tags:
-                                tags_match = all(tag in processed_row['tags'] for tag in filter_tags)
-                                if not tags_match:
+                                # 确保所有过滤标签都存在于记忆的标签中
+                                memory_tags = set(processed_row['tags'])
+                                filter_tags_set = set(filter_tags)
+                                if not filter_tags_set.issubset(memory_tags):
                                     continue
 
                             memories.append(processed_row)
+
                     except Exception as row_error:
                         logger.error(f"Error processing row {idx}: {row_error}")
                         continue

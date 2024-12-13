@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 class MemoryServiceConfig(BaseSettings):
@@ -20,6 +20,8 @@ class MemoryServiceConfig(BaseSettings):
     HNSW_M: int = 16
     HNSW_EF_CONSTRUCTION: int = 200
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    # 使用新的配置方式
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True
+    )
