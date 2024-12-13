@@ -134,8 +134,7 @@ class InfinityMemory(BaseMemory):
     tenant_id: str
     project_id: str
     
-    def __init__(self, memory_service: InfinityMemoryService, 
-                 tenant_id: str, project_id: str):
+    def __init__(self, memory_service: InfinityMemoryService, tenant_id: str, project_id: str):
         self.memory_service = memory_service
         self.tenant_id = tenant_id
         self.project_id = project_id
@@ -186,7 +185,7 @@ class MemoryServicePool:
         try:
             yield service
         finally:
-            pass  # 如果需要，这里可以添加清理逻辑
+            pass # 如果需要，这里可以添加清理逻辑
 ```
 
 ### 2.批量操作
