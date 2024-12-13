@@ -7,24 +7,14 @@ import polars as pl
 
 load_dotenv(find_dotenv())
 
-async def print_table_info(db, table_name):
-    """打印表的详细信息"""
-    table = db.get_table(table_name)
-    try:
-        result = table.output(["*"]).to_pl()
-        row_count = len(result)
-        print(f"Row Count: {row_count}")
+async def main():
+    # 从环境变量或配置文件加载配置
+    config = MemoryServiceConfig()
 
-        if row_count > 0:
-            print("\nSample Data (up to 5 rows):")
-            # 只显示前5行数据
-            sample_data = result[:5] if row_count > 5 else result
-            print(sample_data)
-    except Exception as e:
-        print(f"Error accessing table  {e}")
+    # 初始化记忆服务
+    memory_service = InfinityMemoryService(config)
 
-async def print_database_info(memory_service):
-    """打印数据库信息"""
+    # 打印数据库信息
     print("\n=== Database Information ===")
     databases = memory_service.infinity_obj.list_databases()
     print(f"Available Databases: {databases.db_names}")
@@ -37,12 +27,35 @@ async def print_database_info(memory_service):
 
         for table_name in tables.table_names:
             print(f"\n=== Table: {table_name} ===")
-            await print_table_info(db, table_name)
+            table = db.get_table(table_name)
+            try:
+                # 使用 select 查询获取数据
+                result = table.output(["*"]).to_pl()
+                row_count = len(result) if isinstance(result, pl.DataFrame) else 0
+                print(f"Row Count: {row_count}")
 
-async def run_memory_tests(memory_service):
-    """运行记忆服务测试"""
+                if row_count > 0:
+                    print("\nSample Data (up to 5 rows):")
+                    if isinstance(result, pl.DataFrame):
+                        sample = result.slice(0, 5)
+                        print(sample)
+                    else:
+                        print("Data format not supported for display")
+            except Exception as e:
+                print(f"Error accessing table data: {e}")
+
+    # 示例租户和项目
     tenant_id = "tenant_001"
     project_id = "project_001"
+
+    print("\n=== Dropped Existing Table ===")
+    # 删除已存在的表
+    table_name = memory_service._get_table_name(tenant_id, project_id)
+    try:
+        memory_service.db.drop_table(table_name)
+        print(f"Dropped existing table: {table_name}")
+    except Exception as e:
+        print(f"Table {table_name} does not exist or could not be dropped: {e}")
 
     print("\n=== Memory Service Tests ===")
 
@@ -58,6 +71,7 @@ async def run_memory_tests(memory_service):
     )
     end_time = time.time()
     print(f"Memory added with ID: {memory_id} in {end_time - start_time:.4f} seconds")
+    await asyncio.sleep(1)  # 等待数据写入
 
     # 获取记忆
     print("\nRetrieving memory...")
@@ -79,6 +93,7 @@ async def run_memory_tests(memory_service):
     )
     end_time = time.time()
     print(f"Memory updated: {update_success} in {end_time - start_time:.4f} seconds")
+    await asyncio.sleep(1)  # 等待数据更新
 
     # 列出记忆
     print("\nListing memories...")
@@ -87,6 +102,7 @@ async def run_memory_tests(memory_service):
     end_time = time.time()
     print(f"Memories listed: {memories} in {end_time - start_time:.4f} seconds")
 
+    await asyncio.sleep(1)  # 等待索引更新
     # 搜索记忆
     print("\nSearching memory...")
     start_time = time.time()
@@ -107,12 +123,9 @@ async def run_memory_tests(memory_service):
     end_time = time.time()
     print(f"Memory deleted: {delete_success} in {end_time - start_time:.4f} seconds")
 
-    return memory_service, tenant_id, project_id
-
-async def run_batch_test(memory_service, tenant_id, project_id):
-    """运行批量添加测试"""
+    # 性能测试：批量添加记忆
     print("\nPerformance test: Adding multiple memories...")
-    num_memories = 10
+    num_memories = 1
     memories_to_add = [
         {
             "content": f"批量记忆内容 {i}",
@@ -125,30 +138,6 @@ async def run_batch_test(memory_service, tenant_id, project_id):
     memory_ids = await memory_service.batch_add_memories(tenant_id, project_id, memories_to_add)
     end_time = time.time()
     print(f"Added {len(memory_ids)} memories in {end_time - start_time:.4f} seconds")
-
-async def main():
-    try:
-        # 从环境变量或配置文件加载配置
-        config = MemoryServiceConfig()
-
-        # 使用上下文管理器初始化记忆服务
-        async with InfinityMemoryService(config) as memory_service:
-            # 打印数据库信息
-            await print_database_info(memory_service)
-
-            # 运行记忆服务测试
-            memory_service, tenant_id, project_id = await run_memory_tests(memory_service)
-
-            # 运行批量添加测试
-            await run_batch_test(memory_service, tenant_id, project_id)
-
-            # 再次打印数据库信息以查看变化
-            print("\n=== Final Database State ===")
-            await print_database_info(memory_service)
-
-    except Exception as e:
-        print(f"Error in main: {e}")
-        raise
 
 if __name__ == "__main__":
     asyncio.run(main())

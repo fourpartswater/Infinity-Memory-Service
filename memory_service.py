@@ -11,6 +11,30 @@ import re
 import asyncio
 import time
 
+import logging
+
+# 配置日志
+logging.basicConfig(
+    level=logging.ERROR,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def serialize_data(metadata: Optional[Dict[str, Any]], tags: Optional[List[str]]) -> (str, str):
+    """序列化 metadata 和 tags 字段为 JSON 字符串"""
+    try:
+        metadata_str = json.dumps(metadata or {})
+    except (TypeError, ValueError) as e:
+        logger.warning(f"Failed to serialize metadata: {e}")
+        metadata_str = '{}'
+
+    try:
+        tags_str = json.dumps(tags or [])
+    except (TypeError, ValueError) as e:
+        logger.warning(f"Failed to serialize tags: {e}")
+        tags_str = '[]'
+
+    return metadata_str, tags_str
 
 class InfinityMemoryService:
     def __init__(self, config: Optional[MemoryServiceConfig] = None):
@@ -53,36 +77,52 @@ class InfinityMemoryService:
         try:
             self.infinity_obj.list_databases()
         except Exception as e:
-            if "TSocket read 0 bytes" in str(e) or "Connection refused" in str(e):
-                self._reconnect()
-                # 验证重连是否成功
-                try:
-                    self.infinity_obj.list_databases()
-                except Exception as e2:
-                    raise Exception(f"Failed to reconnect: {e2}")
+            logger.warning(f"Connection check failed: {e}")
+            self._reconnect()
+            # 验证重连
+            try:
+                self.infinity_obj.list_databases()
+            except Exception as e2:
+                logger.error(f"Reconnection failed: {e2}")
+                raise Exception(f"Failed to reconnect: {e2}")
 
-    def _process_row(self, row) -> Dict:
+    def _process_row(self, row) -> Optional[Dict]:
         """处理单行数据"""
+        if row is None:
+            #logger.error("Received None row in _process_row")
+            return None
+
         try:
-            # 确保所有字段都被转换为字符串
-            memory_id = str(row['memory_id']) if 'memory_id' in row else None
-            content = str(row['content']) if 'content' in row else None
-            timestamp = str(row['timestamp']) if 'timestamp' in row else None
+            # 处理 polars 数据格式
+            memory_id = row['memory_id'] if 'memory_id' in row else None
+            if hasattr(memory_id, 'logic_type'):
+                return None
+            else:
+                memory_id = memory_id[0]
 
-            # 处理 JSON 字段
-            metadata_str = str(row['metadata']) if 'metadata' in row else '{}'
-            tags_str = str(row['tags']) if 'tags' in row else '[]'
+            content = str(row['content'][0]) if 'content' in row else None
+            timestamp = str(row['timestamp'][0]) if 'timestamp' in row else None
 
-            # 解析 JSON 字段
-            try:
-                metadata = json.loads(metadata_str)
-            except:
-                metadata = {}
+            # 处理 metadata
+            metadata_str = str(row['metadata'][0]) if 'metadata' in row else '{}'
+            metadata = {}
+            if metadata_str.strip() and metadata_str != 'null':
+                try:
+                    metadata = json.loads(metadata_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse meta {metadata_str}: {e}")
 
-            try:
-                tags = json.loads(tags_str)
-            except:
-                tags = []
+            # 处理 tags
+            tags_str = str(row['tags'][0]) if 'tags' in row else '[]'
+            tags = []
+            if tags_str.strip() and tags_str != 'null':
+                try:
+                    tags = json.loads(tags_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse tags: {tags_str}: {e}")
+
+            # 处理 score
+            score = float(row['_score'][0]) if '_score' in row else None
 
             return {
                 "memory_id": memory_id,
@@ -90,10 +130,11 @@ class InfinityMemoryService:
                 "timestamp": timestamp,
                 "metadata": metadata,
                 "tags": tags,
-                "score": float(row['_score']) if '_score' in row else None
+                "score": score
             }
+
         except Exception as e:
-            print(f"Error processing row: {e}")
+            logger.error(f"Error processing row: {e} , row: {row}", exc_info=True)
             return None
 
     def _init_database(self):
@@ -196,16 +237,22 @@ class InfinityMemoryService:
         table = self._get_table(tenant_id, project_id)
         embedding = await self._get_embedding(content)
         memory_id = f"mem_{tenant_id}_{project_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-        # 将 datetime 转换为 YYYY-MM-DD HH:MM:SS 格式字符串
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # 使用 serialize_data 函数
+        metadata_str, tags_str = serialize_data(metadata, tags)
+
         table.insert([{
             "memory_id": memory_id,
             "content": content,
             "embedding": embedding,
-            "timestamp": timestamp,  # 使用 YYYY-MM-DD HH:MM:SS 格式
-            "metadata": json.dumps(metadata or {}),
-            "tags": json.dumps(tags or [])
+            "timestamp": timestamp,
+            "metadata": metadata_str,
+            "tags": tags_str
         }])
+
+        logger.debug(f"Inserting memory with metadata: {metadata_str} and tags: {tags_str}")
+
         return memory_id
 
     async def batch_add_memories(self,
@@ -227,27 +274,33 @@ class InfinityMemoryService:
                     self._get_embedding(memory['content'])
                     for memory in batch
                 ]
+
                 embeddings = await asyncio.gather(*embedding_tasks)
 
                 for j, (memory, embedding) in enumerate(zip(batch, embeddings)):
                     memory_id = f"mem_{tenant_id}_{project_id}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{i}_{j}"
                     memory_ids.append(memory_id)
 
+                    # 使用 serialize_data 函数
+                    metadata_str, tags_str = serialize_data(memory.get('metadata', {}), memory.get('tags', []))
+
                     batch_data.append({
                         "memory_id": memory_id,
                         "content": memory['content'],
                         "embedding": embedding,
                         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        "metadata": json.dumps(memory.get('metadata', {})),
-                        "tags": json.dumps(memory.get('tags', []))
+                        "metadata": metadata_str,
+                        "tags": tags_str
                     })
+                    logger.debug(f"batch_add_memories: Inserting memory with metadata: {metadata_str} and tags: {tags_str}")
 
                 table.insert(batch_data)
                 await asyncio.sleep(0.1)  # 添加短暂延迟
 
             return memory_ids
+
         except Exception as e:
-            print(f"Error in batch insert: {e}")
+            logger.error(f"Error in batch insert: {e}")
             return []
 
     async def get_memory(self,
@@ -258,7 +311,8 @@ class InfinityMemoryService:
         self._ensure_connection()
         table = self._get_table(tenant_id, project_id)
         try:
-            result = table.filter(f"memory_id = '{memory_id}'").output(["*"]).to_pl()
+            result = table.filter(f"memory_id = '{memory_id}'").output(["*"]).to_result()
+            logger.debug(f"Retrieved data: {result}")
             if result and len(result) > 0:
                 processed_row = self._process_row(result[0])
                 return processed_row if processed_row else None
@@ -281,6 +335,7 @@ class InfinityMemoryService:
 
             if results and len(results) > 0:
                 for row in results:
+                    logger.debug(f"List_memories: Retrieved data: {row}")
                     processed_row = self._process_row(row)
                     if processed_row:
                         memories.append(processed_row)
@@ -299,39 +354,80 @@ class InfinityMemoryService:
         """搜索记忆"""
         self._ensure_connection()
         table = self._get_table(tenant_id, project_id)
+
         try:
             if query_text:
                 # 获取查询文本的向量表示
                 query_embedding = await self._get_embedding(query_text)
 
-                # 使用 fusion 搜索
-                search_query = (table
-                                .match_dense("embedding", query_embedding, "float", "ip", limit)  # 向量搜索
-                                .match_text("content", query_text, limit)  # 文本搜索
-                                .fusion(["_score1", "_score2"], [0.5, 0.5], limit))  # 融合结果
+                # 优先使用向量搜索
+                search_query = table.match_dense(
+                    vector_column_name="embedding",
+                    embedding_data=query_embedding,
+                    embedding_data_type="float",
+                    distance_type="ip",
+                    topn=limit
+                )
+
+                # 执行向量搜索，解包返回的元组
+                results_tuple = search_query.output(["memory_id", "content","timestamp", "metadata", "tags"]).to_result()
+                results = results_tuple #results_tuple[0] if isinstance(results_tuple, tuple) else results_tuple
+
+                # 如果向量搜索没有结果，尝试文本搜索
+                if len(results) == 0:
+                    text_query = table.match_text(
+                        fields="content",
+                        matching_text=query_text,
+                        topn=limit
+                    )
+                    results_tuple = text_query.output(["memory_id", "content","timestamp", "metadata", "tags"]).to_result()
+                    results = results_tuple #results_tuple[0] if isinstance(results_tuple, tuple) else results_tuple
+
             else:
-                search_query = table.output(["*"]).limit(limit)
+                # 如果没有查询文本，直接返回最新记录
+                results_tuple = table.output(["memory_id", "content","timestamp", "metadata", "tags"]).limit(limit).to_result()
+                results = results_tuple #results_tuple[0] if isinstance(results_tuple, tuple) else results_tuple
 
-            # 添加过滤条件
-            if filter_metadata:
-                for key, value in filter_metadata.items():
-                    search_query = search_query.filter(f"metadata LIKE '%\"{key}\": \"{value}\"%'")
-
-            if filter_tags:
-                for tag in filter_tags:
-                    search_query = search_query.filter(f"tags LIKE '%{tag}%'")
-
-            results = search_query.to_pl()
+            # 处理结果
             memories = []
+            if results is not None and len(results) > 0:
+                # 获取列名
+                columns = results.columns if hasattr(results, 'columns') else []
 
-            if results and len(results) > 0:
-                for row in results:
-                    processed_row = self._process_row(row)
-                    if processed_row:
-                        memories.append(processed_row)
-            return memories
+                for idx in range(len(results)):
+                    try:
+                        # 构建行数据
+                        row = results[idx]
+                        if not row:
+                            continue
+                        #for col in columns:
+                        #    row[col] = results[col][idx] if idx < len(results[col]) else None
+
+                        processed_row = self._process_row(row)
+                        if processed_row:
+                            # 在内存中进行过滤
+                            if filter_metadata:
+                                metadata_match = all(
+                                    processed_row['metadata'].get(k) == v
+                                    for k, v in filter_metadata.items()
+                                )
+                                if not metadata_match:
+                                    continue
+
+                            if filter_tags:
+                                tags_match = all(tag in processed_row['tags'] for tag in filter_tags)
+                                if not tags_match:
+                                    continue
+
+                            memories.append(processed_row)
+                    except Exception as row_error:
+                        logger.error(f"Error processing row {idx}: {row_error}")
+                        continue
+
+            return memories[:limit]  # 确保不超过限制数量
+
         except Exception as e:
-            print(f"Error searching memories: {e}")
+            logger.error(f"Error searching memories: {e}", exc_info=True)
             return []
 
     async def update_memory(self,
@@ -344,6 +440,7 @@ class InfinityMemoryService:
         """更新记忆"""
         self._ensure_connection()
         table = self._get_table(tenant_id, project_id)
+
         try:
             update_data = {}
 
@@ -354,20 +451,21 @@ class InfinityMemoryService:
                     "embedding": embedding
                 })
 
-            if metadata is not None:
-                update_data["metadata"] = json.dumps(metadata)
-
-            if tags is not None:
-                update_data["tags"] = json.dumps(tags)
+            if metadata is not None or tags is not None:
+                metadata_str, tags_str = serialize_data(metadata, tags)
+                update_data["metadata"] = metadata_str
+                update_data["tags"] = tags_str
 
             if update_data:
                 table.update(
                     cond=f"memory_id = '{memory_id}'",
                     data=update_data
                 )
+
             return True
+
         except Exception as e:
-            print(f"Error updating memory: {e}")
+            logger.error(f"Error updating memory: {e}")
             return False
 
     async def delete_memory(self,
